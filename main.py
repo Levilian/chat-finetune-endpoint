@@ -3,10 +3,13 @@ from typing import List, Optional
 from pydantic import BaseModel
 import json
 import random
-import openai
+from openai import OpenAI
 import os
+from io import BytesIO
+from dotenv import load_dotenv
 from utils import unicode_converter
 from fastapi.middleware.cors import CORSMiddleware
+from random import shuffle
 
 class Message(BaseModel):
     sender_name: str
@@ -40,7 +43,7 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
-@app.post("/submit-training-data")
+@app.post("/submit-fine-tuning")
 async def train_ai(submit_data: SubmitPayload):
     # Process each JSON file and extract messages
     training_data = []
@@ -52,10 +55,55 @@ async def train_ai(submit_data: SubmitPayload):
         random_conversations = generate_random_conversations(messages, submit_data.participant)
         training_data.extend(random_conversations)
     # Train your ML model here with 'training_data'
-    # ...
 
-    # Return a success message or result
-    return {"message": "Training started successfully", "result": training_data}
+    # shuffle and split training data into 90% train and 10% validation
+    shuffle(training_data)
+    split_index = int(len(training_data) * 0.9)
+    
+    # split training data into train and validation
+    train_set = training_data[:split_index]
+    validation_set = training_data[split_index:]
+
+    # Convert training and validation data to newline-delimited JSON format
+    training_ndjson = "\n".join(json.dumps(conv) for conv in train_set).encode('utf-8')
+    validation_ndjson = "\n".join(json.dumps(conv) for conv in validation_set).encode('utf-8')
+
+    # Create an in-memory bytes buffer for each file
+    training_buffer = BytesIO(training_ndjson)
+    validation_buffer = BytesIO(validation_ndjson)
+
+    load_dotenv()
+    client = OpenAI()
+    client.api_key = os.getenv("OPENAI_API_KEY")
+
+    # Upload the buffer to OpenAI using the files.create endpoint
+    training_file_response = client.files.create(
+        file=training_buffer,
+        purpose="fine-tune"
+    )
+
+    validation_file_response = client.files.create(
+        file=validation_buffer,
+        purpose="fine-tune"
+    )
+
+    # ... (handle response, etc.)
+    print(training_file_response.id)
+    print(validation_file_response.id)
+
+    response = client.fine_tuning.jobs.create(
+    training_file=training_file_response.id,
+    validation_file=validation_file_response.id,
+    model="gpt-3.5-turbo",
+    suffix="test-bot",
+    )
+
+    job_id = response.id
+    print(job_id)
+
+    job_response = client.fine_tuning.jobs.retrieve(job_id)
+    print(job_response.fine_tuned_model)
+    return {"message": "Training started successfully", "result": {"training_file_id": training_file_response.id, "validation_file_id": validation_file_response.id, "fine_tuned_model": job_response.fine_tuned_model}}
 
 def extract_messages(data, my_name):
     # Process the messages
